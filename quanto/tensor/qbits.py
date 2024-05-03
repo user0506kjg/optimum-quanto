@@ -17,22 +17,30 @@ from copy import copy
 
 import torch
 from torch.autograd import Function
-from torch.utils import _pytree as pytree
 
+from .core import ungroup
 from .packed import PackedTensor
-from .qtensor import QTensor
-from .qtype import qint8, qtypes
+from .qtensor import QTensor, qfallback
+from .qtype import qtypes
 
 
 __all__ = ["QBitsTensor"]
 
 
-class QBitsToQTensor(Function):
+class QBitsDequantizer(Function):
     @staticmethod
     def forward(ctx, t):
         unpacked = t._data.unpack()
         int8_data = unpacked.to(torch.int8) - t._zeropoint.to(torch.int8)
-        return QTensor(qint8, t.axis, t.size(), t.stride(), int8_data, t._scale)
+        if t.qtype.is_floating_point:
+            # Upcast explicitly to the scale dtype
+            dqt = t._scale * int8_data.to(t._scale.dtype)
+        else:
+            dqt = t._scale * int8_data
+        if t.axis is None:
+            return dqt
+        # Restore the original shape (if needed)
+        return ungroup(dqt, axis=t.axis, orig_shape=t.shape)
 
     @staticmethod
     def backward(ctx, gO):
@@ -50,24 +58,16 @@ class QBitsTensor(QTensor):
         )
 
     def __init__(self, qtype, axis, size, stride, data, scale, zeropoint, requires_grad=False):
-        super().__init__(qtype, axis, size, stride, data, scale, requires_grad=requires_grad)
+        super().__init__(qtype, axis)
+        self._data = data
+        self._scale = scale
         self._zeropoint = zeropoint
 
     def __repr__(self):
-        autograd_info = (
-            f", grad_fn={self.grad_fn}" if self.grad_fn else ", requires_grad=True" if self.requires_grad else ""
-        )
-        return f"QBitsTensor({self._data}, scale={self._scale}, zeropoint={self._zeropoint}, dtype={self.dtype}{autograd_info})"
-
-    def qtensor(self):
-        return QBitsToQTensor.apply(self)
+        return f"QBitsTensor({self._data}, scale={self._scale}, zeropoint={self._zeropoint}, dtype={self.dtype})"
 
     def dequantize(self):
-        return self.qtensor().dequantize()
-
-    @property
-    def qtype(self):
-        return self._qtype
+        return QBitsDequantizer.apply(self)
 
     def __tensor_flatten__(self):
         inner_tensors = ["_data", "_scale", "_zeropoint"]
@@ -93,6 +93,20 @@ class QBitsTensor(QTensor):
         return QBitsTensor(qtype, axis, size, stride, data, scale, zeropoint)
 
     @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        from .func import get_qtensor_func
+
+        kwargs = kwargs or {}
+
+        # Look for a func accepting QTensor inputs
+        qfunc = get_qtensor_func(func)
+        if qfunc is not None:
+            return qfunc(*args, **kwargs)
+        # Defer to dispatcher to look instead for QTensor operations
+        with torch._C.DisableTorchFunctionSubclass():
+            return func(*args, **kwargs)
+
+    @classmethod
     def __torch_dispatch__(cls, op, types, args, kwargs=None):
         if op.overloadpacket is torch.ops.aten.detach:
             # Detach is required when copying and deserializing
@@ -113,5 +127,5 @@ class QBitsTensor(QTensor):
             zeropoint_kwargs["dtype"] = torch.int8
             zeropoint = op(t._zeropoint, **data_kwargs)
             return QBitsTensor(t._qtype, t._axis, t.size(), t.stride(), data, scale, zeropoint)
-        args, kwargs = pytree.tree_map_only(QBitsTensor, lambda x: x.qtensor(), (args, kwargs or {}))
-        return op(*args, **kwargs)
+        # No dispatch available: qfallback
+        return qfallback(op, *args, **kwargs)
