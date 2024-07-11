@@ -16,6 +16,7 @@ __version__ = "0.2.3dev"
 
 from .calibrate import *
 from .library import *
+from .models import *
 from .nn import *
 from .quantize import *
 from .tensor import *
