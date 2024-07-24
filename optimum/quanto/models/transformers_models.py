@@ -14,10 +14,7 @@
 
 import json
 import os
-from collections.abc import Mapping
-from typing import Any, Dict, List, Optional, Union
-
-from safetensors import safe_open
+from typing import Any, List, Optional, Union
 
 from ..nn import QModuleMixin
 from ..quantize import Optimizer, freeze, qtype, quantization_map, quantize, requantize
@@ -32,40 +29,6 @@ if not is_transformers_available():
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
 from transformers.modeling_utils import get_checkpoint_shard_files, load_state_dict
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME, is_accelerate_available
-
-
-class ShardedStateDict(Mapping):
-    """A pytorch state_dict stored in multiple safetensors files
-
-    This class implements the `collections.abc.Mapping` interface.
-    It can be passed to `torch.nn.Module.load_state_dict()` to recursively
-    load the module tensors.
-    """
-
-    def __init__(self, base_dir: str, tensor_index: Dict[str, str]):
-        self._base_dir = base_dir
-        self._index = tensor_index
-        self._handles = {}
-
-    def __iter__(self):
-        yield from self._index
-
-    def __len__(self):
-        return self._index.__len__()
-
-    def __getitem__(self, key: Any) -> Any:
-        filename = self._index.__getitem__(key)
-        if filename not in self._handles:
-            f = safe_open(os.path.join(self._base_dir, filename), framework="pytorch")
-            self._handles[filename] = f
-        f = self._handles[filename]
-        return f.get_tensor(key)
-
-    def __contains__(self, key: object) -> bool:
-        return self._index.__contains__(key)
-
-    def keys(self):
-        return self._index.keys()
 
 
 class QuantizedTransformersModel:
@@ -163,6 +126,8 @@ class QuantizedTransformersModel:
             # Look for the index of a sharded checkpoint
             checkpoint_file = os.path.join(model_name_or_path, SAFE_WEIGHTS_INDEX_NAME)
             if os.path.exists(checkpoint_file):
+                from . import ShardedStateDict
+
                 # Convert the checkpoint path to a list of shards
                 checkpoint_file, sharded_metadata = get_checkpoint_shard_files(model_name_or_path, checkpoint_file)
                 # Create a mapping for the sharded safetensor files
