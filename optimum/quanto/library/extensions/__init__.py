@@ -19,7 +19,10 @@ from .extension import *
 
 
 if torch.cuda.is_available():
-    from .cuda import *
+    if torch.version.cuda:
+        from .cuda import *
+    elif torch.version.hip:
+        from .hip import *
 
 if torch.backends.mps.is_available():
     from .mps import *
